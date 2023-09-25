@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import torch
+import paddle
 import numpy as np
 
 
@@ -101,7 +101,7 @@ def get_aligned_sequences(x, y, trace_back):
         elif trace_back[i][j] == 4:
             break
     mapper_y_to_x.reverse()
-    return x_seq, y_seq, torch.tensor(mapper_y_to_x, dtype=torch.int64)
+    return x_seq, y_seq, paddle.to_tensor(mapper_y_to_x, dtype="int64")
 
 
 def get_mapper(x: str, y: str, tokenizer, max_len=77):
@@ -110,11 +110,11 @@ def get_mapper(x: str, y: str, tokenizer, max_len=77):
     score = ScoreParams(0, 1, -1)
     matrix, trace_back = global_align(x_seq, y_seq, score)
     mapper_base = get_aligned_sequences(x_seq, y_seq, trace_back)[-1]
-    alphas = torch.ones(max_len)
+    alphas = paddle.ones(max_len)
     alphas[: mapper_base.shape[0]] = mapper_base[:, 1].ne(-1).float()
-    mapper = torch.zeros(max_len, dtype=torch.int64)
+    mapper = paddle.zeros(max_len).astype("int64")
     mapper[:mapper_base.shape[0]] = mapper_base[:, 1]
-    mapper[mapper_base.shape[0]:] = len(y_seq) + torch.arange(max_len - len(y_seq))
+    mapper[mapper_base.shape[0]:] = len(y_seq) + paddle.arange(max_len - len(y_seq))
     return mapper, alphas
 
 
@@ -125,7 +125,7 @@ def get_refinement_mapper(prompts, tokenizer, max_len=77):
         mapper, alpha = get_mapper(x_seq, prompts[i], tokenizer, max_len)
         mappers.append(mapper)
         alphas.append(alpha)
-    return torch.stack(mappers), torch.stack(alphas)
+    return paddle.stack(mappers), paddle.stack(alphas)
 
 
 def get_word_inds(text: str, word_place: int, tokenizer):
@@ -182,7 +182,7 @@ def get_replacement_mapper_(x: str, y: str, tokenizer, max_len=77):
             i += 1
             j += 1
 
-    return torch.from_numpy(mapper).float()
+    return paddle.to_tensor(mapper, dtype=paddle.get_default_dtype())
 
 
 
@@ -192,5 +192,5 @@ def get_replacement_mapper(prompts, tokenizer, max_len=77):
     for i in range(1, len(prompts)):
         mapper = get_replacement_mapper_(x_seq, prompts[i], tokenizer, max_len)
         mappers.append(mapper)
-    return torch.stack(mappers)
+    return paddle.stack(mappers)
 

@@ -28,15 +28,15 @@
 
 from typing import Optional, Union, Tuple, List, Callable, Dict
 from tqdm.notebook import tqdm
-import torch
-from diffusers import StableDiffusionPipeline, DDIMScheduler
-import torch.nn.functional as nnf
+import paddle
+from ppdiffusers import StableDiffusionPipeline, DDIMScheduler
+import paddle.nn.functional as nnf
 import numpy as np
 import abc
 import ptp_utils
 import seq_aligner
 import shutil
-from torch.optim.adam import Adam
+from paddle.optimizer.adam import Adam
 from PIL import Image
 
 
@@ -45,14 +45,14 @@ from PIL import Image
 # In[3]:
 
 
-scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
-MY_TOKEN = ''
+scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", 
+                          clip_sample=False, set_alpha_to_one=False, steps_offset=1)
 LOW_RESOURCE = False 
 NUM_DDIM_STEPS = 50
 GUIDANCE_SCALE = 7.5
 MAX_NUM_WORDS = 77
-device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", use_auth_token=MY_TOKEN, scheduler=scheduler).to(device)
+device = paddle.CUDAPlace(0) if paddle.device.cuda.device_count()>0 else paddle.CPUPlace()
+ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", scheduler=scheduler)
 try:
     ldm_stable.disable_xformers_memory_efficient_attention()
 except AttributeError:
@@ -83,8 +83,8 @@ class LocalBlend:
         if self.counter > self.start_blend:
            
             maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
-            maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
-            maps = torch.cat(maps, dim=1)
+            maps = [item.reshape((self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS)) for item in maps]
+            maps = paddle.concat(maps, dim=1)
             mask = self.get_mask(maps, self.alpha_layers, True)
             if self.substruct_layers is not None:
                 maps_sub = ~self.get_mask(maps, self.substruct_layers, False)
@@ -94,7 +94,7 @@ class LocalBlend:
         return x_t
        
     def __init__(self, prompts: List[str], words: [List[List[str]]], substruct_words=None, start_blend=0.2, th=(.3, .3)):
-        alpha_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
+        alpha_layers = paddle.zeros((len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS))
         for i, (prompt, words_) in enumerate(zip(prompts, words)):
             if type(words_) is str:
                 words_ = [words_]
@@ -103,7 +103,7 @@ class LocalBlend:
                 alpha_layers[i, :, :, :, :, ind] = 1
         
         if substruct_words is not None:
-            substruct_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
+            substruct_layers = paddle.zeros((len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS))
             for i, (prompt, words_) in enumerate(zip(prompts, substruct_words)):
                 if type(words_) is str:
                     words_ = [words_]
@@ -272,7 +272,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
 class AttentionReplace(AttentionControlEdit):
 
     def replace_cross_attention(self, attn_base, att_replace):
-        return torch.einsum('hpw,bwn->bhpn', attn_base, self.mapper)
+        return paddle.einsum('hpw,bwn->bhpn', attn_base, self.mapper)
       
     def __init__(self, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
                  local_blend: Optional[LocalBlend] = None):
@@ -316,7 +316,7 @@ def get_equalizer(text: str, word_select: Union[int, Tuple[int, ...]], values: U
                   Tuple[float, ...]]):
     if type(word_select) is int or type(word_select) is str:
         word_select = (word_select,)
-    equalizer = torch.ones(1, 77)
+    equalizer = paddle.ones((1, 77))
     
     for word, val in zip(word_select, values):
         inds = ptp_utils.get_word_inds(text, word, tokenizer)
@@ -332,7 +332,7 @@ def aggregate_attention(attention_store: AttentionStore, res: int, from_where: L
             if item.shape[1] == num_pixels:
                 cross_maps = item.reshape(len(prompts), -1, res, res, item.shape[-1])[select]
                 out.append(cross_maps)
-    out = torch.cat(out, dim=0)
+    out = paddle.concat(out, dim=0)
     out = out.sum(0) / out.shape[0]
     return out.cpu()
 
@@ -414,7 +414,7 @@ def load_512(image_path, left=0, right=0, top=0, bottom=0):
 
 class NullInversion:
     
-    def prev_step(self, model_output: Union[torch.FloatTensor, np.ndarray], timestep: int, sample: Union[torch.FloatTensor, np.ndarray]):
+    def prev_step(self, model_output: Union[paddle.Tensor, np.ndarray], timestep: int, sample: Union[paddle.Tensor, np.ndarray]):
         prev_timestep = timestep - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
         alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.scheduler.final_alpha_cumprod
@@ -424,7 +424,7 @@ class NullInversion:
         prev_sample = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
         return prev_sample
     
-    def next_step(self, model_output: Union[torch.FloatTensor, np.ndarray], timestep: int, sample: Union[torch.FloatTensor, np.ndarray]):
+    def next_step(self, model_output: Union[paddle.Tensor, np.ndarray], timestep: int, sample: Union[paddle.Tensor, np.ndarray]):
         timestep, next_timestep = min(timestep - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps, 999), timestep
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep] if timestep >= 0 else self.scheduler.final_alpha_cumprod
         alpha_prod_t_next = self.scheduler.alphas_cumprod[next_timestep]
@@ -439,7 +439,7 @@ class NullInversion:
         return noise_pred
 
     def get_noise_pred(self, latents, t, is_forward=True, context=None):
-        latents_input = torch.cat([latents] * 2)
+        latents_input = paddle.concat([latents] * 2)
         if context is None:
             context = self.context
         guidance_scale = 1 if is_forward else GUIDANCE_SCALE
@@ -452,49 +452,49 @@ class NullInversion:
             latents = self.prev_step(noise_pred, t, latents)
         return latents
 
-    @torch.no_grad()
+    @paddle.no_grad()
     def latent2image(self, latents, return_type='np'):
         latents = 1 / 0.18215 * latents.detach()
         image = self.model.vae.decode(latents)['sample']
         if return_type == 'np':
-            image = (image / 2 + 0.5).clamp(0, 1)
-            image = image.cpu().permute(0, 2, 3, 1).numpy()[0]
+            image = (image / 2 + 0.5).clip(0, 1)
+            image = image.cpu().transpose(perm=(0, 2, 3, 1)).numpy()[0]
             image = (image * 255).astype(np.uint8)
         return image
 
-    @torch.no_grad()
+    @paddle.no_grad()
     def image2latent(self, image):
-        with torch.no_grad():
+        with paddle.no_grad():
             if type(image) is Image:
                 image = np.array(image)
-            if type(image) is torch.Tensor and image.dim() == 4:
+            if type(image) is paddle.Tensor and image.dim() == 4:
                 latents = image
             else:
-                image = torch.from_numpy(image).float() / 127.5 - 1
-                image = image.permute(2, 0, 1).unsqueeze(0).to(device)
+                image = paddle.to_tensor(image, dtype=paddle.get_default_dtype()) / 127.5 - 1
+                image = image.transpose(perm=(2, 0, 1)).unsqueeze(0)
                 latents = self.model.vae.encode(image)['latent_dist'].mean
                 latents = latents * 0.18215
         return latents
 
-    @torch.no_grad()
+    @paddle.no_grad()
     def init_prompt(self, prompt: str):
         uncond_input = self.model.tokenizer(
             [""], padding="max_length", max_length=self.model.tokenizer.model_max_length,
-            return_tensors="pt"
+            return_tensors="pd"
         )
-        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(self.model.device))[0]
+        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids)[0]
         text_input = self.model.tokenizer(
             [prompt],
             padding="max_length",
             max_length=self.model.tokenizer.model_max_length,
             truncation=True,
-            return_tensors="pt",
+            return_tensors="pd",
         )
-        text_embeddings = self.model.text_encoder(text_input.input_ids.to(self.model.device))[0]
-        self.context = torch.cat([uncond_embeddings, text_embeddings])
+        text_embeddings = self.model.text_encoder(text_input.input_ids)[0]
+        self.context = paddle.concat([uncond_embeddings, text_embeddings])
         self.prompt = prompt
 
-    @torch.no_grad()
+    @paddle.no_grad()
     def ddim_loop(self, latent):
         uncond_embeddings, cond_embeddings = self.context.chunk(2)
         all_latent = [latent]
@@ -510,7 +510,7 @@ class NullInversion:
     def scheduler(self):
         return self.model.scheduler
 
-    @torch.no_grad()
+    @paddle.no_grad()
     def ddim_inversion(self, image):
         latent = self.image2latent(image)
         image_rec = self.latent2image(latent)
@@ -524,18 +524,18 @@ class NullInversion:
         bar = tqdm(total=num_inner_steps * NUM_DDIM_STEPS)
         for i in range(NUM_DDIM_STEPS):
             uncond_embeddings = uncond_embeddings.clone().detach()
-            uncond_embeddings.requires_grad = True
-            optimizer = Adam([uncond_embeddings], lr=1e-2 * (1. - i / 100.))
+            uncond_embeddings.stop_gradient = False
+            optimizer = Adam(parameters=[uncond_embeddings], learning_rate=1e-2 * (1. - i / 100.))
             latent_prev = latents[len(latents) - i - 2]
             t = self.model.scheduler.timesteps[i]
-            with torch.no_grad():
+            with paddle.no_grad():
                 noise_pred_cond = self.get_noise_pred_single(latent_cur, t, cond_embeddings)
             for j in range(num_inner_steps):
                 noise_pred_uncond = self.get_noise_pred_single(latent_cur, t, uncond_embeddings)
                 noise_pred = noise_pred_uncond + GUIDANCE_SCALE * (noise_pred_cond - noise_pred_uncond)
                 latents_prev_rec = self.prev_step(noise_pred, t, latent_cur)
                 loss = nnf.mse_loss(latents_prev_rec, latent_prev)
-                optimizer.zero_grad()
+                optimizer.clear_grad()
                 loss.backward()
                 optimizer.step()
                 loss_item = loss.item()
@@ -545,8 +545,8 @@ class NullInversion:
             for j in range(j + 1, num_inner_steps):
                 bar.update()
             uncond_embeddings_list.append(uncond_embeddings[:1].detach())
-            with torch.no_grad():
-                context = torch.cat([uncond_embeddings, cond_embeddings])
+            with paddle.no_grad():
+                context = paddle.concat([uncond_embeddings, cond_embeddings])
                 latent_cur = self.get_noise_pred(latent_cur, t, False, context)
         bar.close()
         return uncond_embeddings_list
@@ -581,15 +581,16 @@ null_inversion = NullInversion(ldm_stable)
 # In[6]:
 
 
-@torch.no_grad()
+@paddle.no_grad()
 def text2image_ldm_stable(
     model,
     prompt:  List[str],
     controller,
     num_inference_steps: int = 50,
     guidance_scale: Optional[float] = 7.5,
-    generator: Optional[torch.Generator] = None,
-    latent: Optional[torch.FloatTensor] = None,
+    # generator: Optional[torch.Generator] = None,
+    generator: Optional[object] = None,
+    latent: Optional[paddle.Tensor] = None,
     uncond_embeddings=None,
     start_time=50,
     return_type='image'
@@ -603,15 +604,15 @@ def text2image_ldm_stable(
         padding="max_length",
         max_length=model.tokenizer.model_max_length,
         truncation=True,
-        return_tensors="pt",
+        return_tensors="pd",
     )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    text_embeddings = model.text_encoder(text_input.input_ids)[0]
     max_length = text_input.input_ids.shape[-1]
     if uncond_embeddings is None:
         uncond_input = model.tokenizer(
-            [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
+            [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pd"
         )
-        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
+        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids)[0]
     else:
         uncond_embeddings_ = None
 
@@ -619,9 +620,9 @@ def text2image_ldm_stable(
     model.scheduler.set_timesteps(num_inference_steps)
     for i, t in enumerate(tqdm(model.scheduler.timesteps[-start_time:])):
         if uncond_embeddings_ is None:
-            context = torch.cat([uncond_embeddings[i].expand(*text_embeddings.shape), text_embeddings])
+            context = paddle.concat([uncond_embeddings[i].expand(text_embeddings.shape), text_embeddings])
         else:
-            context = torch.cat([uncond_embeddings_, text_embeddings])
+            context = paddle.concat([uncond_embeddings_, text_embeddings])
         latents = ptp_utils.diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False)
         
     if return_type == 'image':
