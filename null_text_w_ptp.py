@@ -25,7 +25,8 @@
 
 # In[2]:
 
-
+import os
+os.environ["FLAGS_set_to_1d"] = "False"
 from typing import Optional, Union, Tuple, List, Callable, Dict
 from tqdm.notebook import tqdm
 import paddle
@@ -48,7 +49,7 @@ from PIL import Image
 scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", 
                           clip_sample=False, set_alpha_to_one=False, steps_offset=1)
 LOW_RESOURCE = False 
-NUM_DDIM_STEPS = 50
+NUM_DDIM_STEPS = 1  # 50
 GUIDANCE_SCALE = 7.5
 MAX_NUM_WORDS = 77
 device = paddle.CUDAPlace(0) if paddle.device.cuda.device_count()>0 else paddle.CPUPlace()
@@ -110,10 +111,10 @@ class LocalBlend:
                 for word in words_:
                     ind = ptp_utils.get_word_inds(prompt, word, tokenizer)
                     substruct_layers[i, :, :, :, :, ind] = 1
-            self.substruct_layers = substruct_layers.to(device)
+            self.substruct_layers = substruct_layers.cuda()
         else:
             self.substruct_layers = None
-        self.alpha_layers = alpha_layers.to(device)
+        self.alpha_layers = alpha_layers.cuda()
         self.start_blend = int(start_blend * NUM_DDIM_STEPS)
         self.counter = 0 
         self.th=th
@@ -246,7 +247,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         super(AttentionControlEdit, self).forward(attn, is_cross, place_in_unet)
         if is_cross or (self.num_self_replace[0] <= self.cur_step < self.num_self_replace[1]):
             h = attn.shape[0] // (self.batch_size)
-            attn = attn.reshape(self.batch_size, h, *attn.shape[1:])
+            attn = attn.reshape((self.batch_size, h, *attn.shape[1:]))
             attn_base, attn_repalce = attn[0], attn[1:]
             if is_cross:
                 alpha_words = self.cross_replace_alpha[self.cur_step]
@@ -254,7 +255,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                 attn[1:] = attn_repalce_new
             else:
                 attn[1:] = self.replace_self_attention(attn_base, attn_repalce, place_in_unet)
-            attn = attn.reshape(self.batch_size * h, *attn.shape[2:])
+            attn = attn.reshape((self.batch_size * h, *attn.shape[2:]))
         return attn
     
     def __init__(self, prompts, num_steps: int,
@@ -263,7 +264,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                  local_blend: Optional[LocalBlend]):
         super(AttentionControlEdit, self).__init__()
         self.batch_size = len(prompts)
-        self.cross_replace_alpha = ptp_utils.get_time_words_attention_alpha(prompts, num_steps, cross_replace_steps, tokenizer).to(device)
+        self.cross_replace_alpha = ptp_utils.get_time_words_attention_alpha(prompts, num_steps, cross_replace_steps, tokenizer).cuda()
         if type(self_replace_steps) is float:
             self_replace_steps = 0, self_replace_steps
         self.num_self_replace = int(num_steps * self_replace_steps[0]), int(num_steps * self_replace_steps[1])
@@ -277,7 +278,7 @@ class AttentionReplace(AttentionControlEdit):
     def __init__(self, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
                  local_blend: Optional[LocalBlend] = None):
         super(AttentionReplace, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
-        self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer).to(device)
+        self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer).cuda()
         
 
 class AttentionRefine(AttentionControlEdit):
@@ -292,8 +293,8 @@ class AttentionRefine(AttentionControlEdit):
                  local_blend: Optional[LocalBlend] = None):
         super(AttentionRefine, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
         self.mapper, alphas = seq_aligner.get_refinement_mapper(prompts, tokenizer)
-        self.mapper, alphas = self.mapper.to(device), alphas.to(device)
-        self.alphas = alphas.reshape(alphas.shape[0], 1, 1, alphas.shape[1])
+        self.mapper, alphas = self.mapper.cuda(), alphas.cuda()
+        self.alphas = alphas.reshape((alphas.shape[0], 1, 1, alphas.shape[1]))
 
 
 class AttentionReweight(AttentionControlEdit):
@@ -308,7 +309,7 @@ class AttentionReweight(AttentionControlEdit):
     def __init__(self, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float, equalizer,
                 local_blend: Optional[LocalBlend] = None, controller: Optional[AttentionControlEdit] = None):
         super(AttentionReweight, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
-        self.equalizer = equalizer.to(device)
+        self.equalizer = equalizer.cuda()
         self.prev_controller = controller
 
 
@@ -330,7 +331,7 @@ def aggregate_attention(attention_store: AttentionStore, res: int, from_where: L
     for location in from_where:
         for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
             if item.shape[1] == num_pixels:
-                cross_maps = item.reshape(len(prompts), -1, res, res, item.shape[-1])[select]
+                cross_maps = item.reshape((len(prompts), -1, res, res, item.shape[-1]))[select]
                 out.append(cross_maps)
     out = paddle.concat(out, dim=0)
     out = out.sum(0) / out.shape[0]
@@ -354,7 +355,7 @@ def make_controller(prompts: List[str], is_replace_controller: bool, cross_repla
 
 
 def show_cross_attention(attention_store: AttentionStore, res: int, from_where: List[str], select: int = 0):
-    tokens = tokenizer.encode(prompts[select])
+    tokens = tokenizer.encode(prompts[select])["input_ids"]
     decoder = tokenizer.decode
     attention_maps = aggregate_attention(attention_store, res, from_where, True, select)
     images = []
@@ -375,7 +376,7 @@ def show_self_attention_comp(attention_store: AttentionStore, res: int, from_whe
     u, s, vh = np.linalg.svd(attention_maps - np.mean(attention_maps, axis=1, keepdims=True))
     images = []
     for i in range(max_com):
-        image = vh[i].reshape(res, res)
+        image = vh[i].reshape((res, res))
         image = image - image.min()
         image = 255 * image / image.max()
         image = np.repeat(np.expand_dims(image, axis=2), 3, axis=2).astype(np.uint8)

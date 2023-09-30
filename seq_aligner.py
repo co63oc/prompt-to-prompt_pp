@@ -105,8 +105,8 @@ def get_aligned_sequences(x, y, trace_back):
 
 
 def get_mapper(x: str, y: str, tokenizer, max_len=77):
-    x_seq = tokenizer.encode(x)
-    y_seq = tokenizer.encode(y)
+    x_seq = tokenizer.encode(x)["input_ids"]
+    y_seq = tokenizer.encode(y)["input_ids"]
     score = ScoreParams(0, 1, -1)
     matrix, trace_back = global_align(x_seq, y_seq, score)
     mapper_base = get_aligned_sequences(x_seq, y_seq, trace_back)[-1]
@@ -136,7 +136,7 @@ def get_word_inds(text: str, word_place: int, tokenizer):
         word_place = [word_place]
     out = []
     if len(word_place) > 0:
-        words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)][1:-1]
+        words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)["input_ids"]][1:-1]
         cur_len, ptr = 0, 0
 
         for i in range(len(words_encode)):

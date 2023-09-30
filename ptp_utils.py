@@ -79,7 +79,7 @@ def latent2image(vae, latents):
     latents = 1 / 0.18215 * latents
     image = vae.decode(latents)['sample']
     image = (image / 2 + 0.5).clip(0, 1)
-    image = image.cpu().permute(0, 2, 3, 1).numpy()
+    image = image.cpu().transpose((0, 2, 3, 1)).numpy()
     image = (image * 255).astype(np.uint8)
     return image
 
@@ -179,7 +179,7 @@ def register_attention_control(model, controller):
         else:
             to_out = self.to_out
 
-        def forward(x, context=None, mask=None):
+        def forward(x, context=None, mask=None, **kwargs):
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             q = self.to_q(x)
@@ -187,14 +187,14 @@ def register_attention_control(model, controller):
             context = context if is_cross else x
             k = self.to_k(context)
             v = self.to_v(context)
-            q = self.reshape_heads_to_batch_dim(q)
-            k = self.reshape_heads_to_batch_dim(k)
-            v = self.reshape_heads_to_batch_dim(v)
+            q = self.head_to_batch_dim(q)
+            k = self.head_to_batch_dim(k)
+            v = self.head_to_batch_dim(v)
 
             sim = paddle.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
             if mask is not None:
-                mask = mask.reshape(batch_size, -1)
+                mask = mask.reshape((batch_size, -1))
                 max_neg_value = -paddle.finfo(sim.dtype).max
                 mask = mask[:, None, :].repeat(h, 1, 1)
                 sim.masked_fill_(~mask, max_neg_value)
@@ -203,7 +203,7 @@ def register_attention_control(model, controller):
             attn = sim.softmax(dim=-1)
             attn = controller(attn, is_cross, place_in_unet)
             out = paddle.einsum("b i j, b j d -> b i d", attn, v)
-            out = self.reshape_batch_dim_to_heads(out)
+            out = self.batch_to_head_dim(out)
             return to_out(out)
 
         return forward
@@ -220,7 +220,8 @@ def register_attention_control(model, controller):
         controller = DummyController()
 
     def register_recr(net_, count, place_in_unet):
-        if net_.__class__.__name__ == 'CrossAttention':
+        # pytorch: CrossAttention, paddle: Attention
+        if net_.__class__.__name__ == 'Attention':
             net_.forward = ca_forward(net_, place_in_unet)
             return count + 1
         elif hasattr(net_, 'children'):
@@ -249,7 +250,7 @@ def get_word_inds(text: str, word_place: int, tokenizer):
         word_place = [word_place]
     out = []
     if len(word_place) > 0:
-        words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)][1:-1]
+        words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)["input_ids"]][1:-1]
         cur_len, ptr = 0, 0
 
         for i in range(len(words_encode)):
@@ -282,7 +283,7 @@ def get_time_words_attention_alpha(prompts, num_steps,
         cross_replace_steps = {"default_": cross_replace_steps}
     if "default_" not in cross_replace_steps:
         cross_replace_steps["default_"] = (0., 1.)
-    alpha_time_words = paddle.zeros(num_steps + 1, len(prompts) - 1, max_num_words)
+    alpha_time_words = paddle.zeros((num_steps + 1, len(prompts) - 1, max_num_words))
     for i in range(len(prompts) - 1):
         alpha_time_words = update_alpha_time_word(alpha_time_words, cross_replace_steps["default_"],
                                                   i)
@@ -292,5 +293,5 @@ def get_time_words_attention_alpha(prompts, num_steps,
              for i, ind in enumerate(inds):
                  if len(ind) > 0:
                     alpha_time_words = update_alpha_time_word(alpha_time_words, item, i, ind)
-    alpha_time_words = alpha_time_words.reshape(num_steps + 1, len(prompts) - 1, 1, 1, max_num_words)
+    alpha_time_words = alpha_time_words.reshape((num_steps + 1, len(prompts) - 1, 1, 1, max_num_words))
     return alpha_time_words
