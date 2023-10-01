@@ -74,8 +74,10 @@ class LocalBlend:
         if use_pool:
             maps = nnf.max_pool2d(maps, (k * 2 + 1, k * 2 +1), (1, 1), padding=(k, k))
         mask = nnf.interpolate(maps, size=(x_t.shape[2:]))
-        mask = mask / mask.max(2, keepdim=True)[0].max(3, keepdim=True)[0]
-        mask = mask.gt(self.th[1-int(use_pool)])
+        # mask = mask / mask.max(2, keepdim=True)[0].max(3, keepdim=True)[0]
+        mask = mask / mask.max(2, keepdim=True).max(3, keepdim=True)
+        mask = mask.greater_than(paddle.to_tensor(self.th[1-int(use_pool)]))
+        print(mask[:1].shape, mask.shape)
         mask = mask[:1] + mask
         return mask
     
