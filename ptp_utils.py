@@ -59,6 +59,9 @@ def view_images(images, num_rows=1, offset_ratio=0.02):
                 i * num_cols + j]
 
     pil_img = Image.fromarray(image_)
+    import time, os
+    os.makedirs("output")
+    pil_img.save("output/" + str(time.time()) + ".png")
     display(pil_img)
 
 

@@ -39,7 +39,7 @@ import seq_aligner
 import shutil
 from paddle.optimizer.adam import Adam
 from PIL import Image
-
+import paddle_add
 
 # For loading the Stable Diffusion using Diffusers, follow the instuctions https://huggingface.co/blog/stable_diffusion and update MY_TOKEN with your token.
 
@@ -49,7 +49,7 @@ from PIL import Image
 scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", 
                           clip_sample=False, set_alpha_to_one=False, steps_offset=1)
 LOW_RESOURCE = False 
-NUM_DDIM_STEPS = 1  # 50
+NUM_DDIM_STEPS = 50  # 50
 GUIDANCE_SCALE = 7.5
 MAX_NUM_WORDS = 77
 device = paddle.CUDAPlace(0) if paddle.device.cuda.device_count()>0 else paddle.CPUPlace()
@@ -77,8 +77,7 @@ class LocalBlend:
         # mask = mask / mask.max(2, keepdim=True)[0].max(3, keepdim=True)[0]
         mask = mask / mask.max(2, keepdim=True).max(3, keepdim=True)
         mask = mask.greater_than(paddle.to_tensor(self.th[1-int(use_pool)]))
-        print(mask[:1].shape, mask.shape)
-        mask = mask[:1] + mask
+        mask = paddle_add.add_bool(mask[:1], mask)
         return mask
     
     def __call__(self, x_t, attention_store):
@@ -92,7 +91,7 @@ class LocalBlend:
             if self.substruct_layers is not None:
                 maps_sub = ~self.get_mask(maps, self.substruct_layers, False)
                 mask = mask * maps_sub
-            mask = mask.float()
+            mask = mask.astype("float32")
             x_t = x_t[:1] + mask * (x_t - x_t[:1])
         return x_t
        
@@ -181,7 +180,7 @@ class SpatialReplace(EmptyControl):
     def step_callback(self, x_t):
         if self.cur_step < self.stop_inject:
             b = x_t.shape[0]
-            x_t = x_t[:1].expand(b, *x_t.shape[1:])
+            x_t = x_t[:1].expand((b, *x_t.shape[1:]))
         return x_t
 
     def __init__(self, stop_inject: float):
@@ -236,7 +235,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         
     def replace_self_attention(self, attn_base, att_replace, place_in_unet):
         if att_replace.shape[2] <= 32 ** 2:
-            attn_base = attn_base.unsqueeze(0).expand(att_replace.shape[0], *attn_base.shape)
+            attn_base = attn_base.unsqueeze(0).expand((att_replace.shape[0], *attn_base.shape))
             return attn_base
         else:
             return att_replace
@@ -286,7 +285,11 @@ class AttentionReplace(AttentionControlEdit):
 class AttentionRefine(AttentionControlEdit):
 
     def replace_cross_attention(self, attn_base, att_replace):
-        attn_base_replace = attn_base[:, :, self.mapper].permute(2, 0, 1, 3)
+        # attn_base_replace = attn_base[:, :, self.mapper].transpose((2, 0, 1, 3))
+        index = self.mapper.flatten()
+        tmp_select = paddle.index_select(attn_base, index, axis=2) 
+        attn_base_replace = tmp_select.reshape((attn_base.shape[0], attn_base.shape[1], *self.mapper.shape)) \
+                .transpose((2, 0, 1, 3))
         attn_replace = attn_base_replace * self.alphas + att_replace * (1 - self.alphas)
         # attn_replace = attn_replace / attn_replace.sum(-1, keepdims=True)
         return attn_replace
