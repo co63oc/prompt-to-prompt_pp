@@ -181,6 +181,8 @@ def register_attention_control(model, controller):
             to_out = self.to_out
 
         def forward(x, context=None, mask=None, **kwargs):
+            context = kwargs["encoder_hidden_states"]
+            mask = kwargs["attention_mask"]
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             q = self.to_q(x)

@@ -74,7 +74,7 @@ class LocalBlend:
         if use_pool:
             maps = nnf.max_pool2d(maps, (k * 2 + 1, k * 2 +1), (1, 1), padding=(k, k))
         mask = nnf.interpolate(maps, size=(x_t.shape[2:]))
-        mask = mask / mask.max(2, keepdims=True)[0].max(3, keepdims=True)[0]
+        mask = mask / mask.max(2, keepdim=True)[0].max(3, keepdim=True)[0]
         mask = mask.gt(self.th[1-int(use_pool)])
         mask = mask[:1] + mask
         return mask
@@ -85,7 +85,7 @@ class LocalBlend:
            
             maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
             maps = [item.reshape((self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS)) for item in maps]
-            maps = paddle.concat(maps, dim=1)
+            maps = paddle.concat(maps, axis=1)
             mask = self.get_mask(maps, self.alpha_layers, True)
             if self.substruct_layers is not None:
                 maps_sub = ~self.get_mask(maps, self.substruct_layers, False)
@@ -333,7 +333,7 @@ def aggregate_attention(attention_store: AttentionStore, res: int, from_where: L
             if item.shape[1] == num_pixels:
                 cross_maps = item.reshape((len(prompts), -1, res, res, item.shape[-1]))[select]
                 out.append(cross_maps)
-    out = paddle.concat(out, dim=0)
+    out = paddle.concat(out, axis=0)
     out = out.sum(0) / out.shape[0]
     return out.cpu()
 
@@ -362,7 +362,7 @@ def show_cross_attention(attention_store: AttentionStore, res: int, from_where: 
     for i in range(len(tokens)):
         image = attention_maps[:, :, i]
         image = 255 * image / image.max()
-        image = image.unsqueeze(-1).expand(*image.shape, 3)
+        image = image.unsqueeze(-1).expand((*image.shape, 3))
         image = image.numpy().astype(np.uint8)
         image = np.array(Image.fromarray(image).resize((256, 256)))
         image = ptp_utils.text_under_image(image, decoder(int(tokens[i])))
