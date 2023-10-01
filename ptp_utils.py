@@ -19,6 +19,7 @@ import cv2
 from typing import Optional, Union, Tuple, List, Callable, Dict
 from IPython.display import display
 from tqdm.notebook import tqdm
+import paddle_add
 
 
 def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, int] = (0, 0, 0)):
@@ -170,8 +171,8 @@ def text2image_ldm_stable(
   
     return image, latent
 
-
 def register_attention_control(model, controller):
+    
     def ca_forward(self, place_in_unet):
         to_out = self.to_out
         if type(to_out) is paddle.nn.layer.container.LayerList:
@@ -187,23 +188,25 @@ def register_attention_control(model, controller):
             context = context if is_cross else x
             k = self.to_k(context)
             v = self.to_v(context)
-            q = self.head_to_batch_dim(q)
-            k = self.head_to_batch_dim(k)
-            v = self.head_to_batch_dim(v)
+            q = paddle_add.reshape_heads_to_batch_dim(self, q)
+            k = paddle_add.reshape_heads_to_batch_dim(self, k)
+            v = paddle_add.reshape_heads_to_batch_dim(self, v)
 
             sim = paddle.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
             if mask is not None:
                 mask = mask.reshape((batch_size, -1))
                 max_neg_value = -paddle.finfo(sim.dtype).max
-                mask = mask[:, None, :].repeat(h, 1, 1)
-                sim.masked_fill_(~mask, max_neg_value)
+                mask = mask[:, None, :].tile((h, 1, 1))
+                # sim.masked_fill_(~mask, max_neg_value)
+                sim = paddle_add.masked_fill(sim, ~mask, max_neg_value)
 
             # attention, what we cannot get enough of
-            attn = sim.softmax(dim=-1)
+            # attn = sim.softmax(axis=-1)
+            attn = paddle.nn.functional.softmax(sim, axis=-1)
             attn = controller(attn, is_cross, place_in_unet)
             out = paddle.einsum("b i j, b j d -> b i d", attn, v)
-            out = self.batch_to_head_dim(out)
+            out = paddle_add.reshape_batch_dim_to_heads(self, out)
             return to_out(out)
 
         return forward
