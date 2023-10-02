@@ -93,7 +93,7 @@ def init_latent(latent, model, height, width, generator, batch_size):
     if latent is None:
         latent = paddle.randn(
             (1, model.unet.in_channels, height // 8, width // 8),
-            generator=generator,
+            # generator=generator,
         )
     latents = latent.expand((batch_size,  model.unet.in_channels, height // 8, width // 8))
     return latent, latents
@@ -114,10 +114,10 @@ def text2image_ldm(
     batch_size = len(prompt)
     
     uncond_input = model.tokenizer([""] * batch_size, padding="max_length", max_length=77, return_tensors="pd")
-    uncond_embeddings = model.bert(uncond_input.input_ids.to(model.device))[0]
+    uncond_embeddings = model.bert(uncond_input.input_ids.cuda())[0]
     
     text_input = model.tokenizer(prompt, padding="max_length", max_length=77, return_tensors="pd")
-    text_embeddings = model.bert(text_input.input_ids.to(model.device))[0]
+    text_embeddings = model.bert(text_input.input_ids.cuda())[0]
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     context = paddle.concat([uncond_embeddings, text_embeddings])
     

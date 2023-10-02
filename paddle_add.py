@@ -27,3 +27,8 @@ def reshape_batch_dim_to_heads(self, *args):
 
 def add_bool(x, y):
     return (x.astype("int32") + y.astype("int32")).astype("bool")
+
+def add_bool_to_float(x, y):
+    return (x.astype("int32") + y.astype("int32")) \
+        .astype("bool") \
+        .astype(paddle.get_default_dtype())
