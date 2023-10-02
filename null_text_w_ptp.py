@@ -285,13 +285,11 @@ class AttentionReplace(AttentionControlEdit):
 class AttentionRefine(AttentionControlEdit):
 
     def replace_cross_attention(self, attn_base, att_replace):
-        # attn_base_replace = attn_base[:, :, self.mapper].transpose((2, 0, 1, 3))
         index = self.mapper.flatten()
         tmp_select = paddle.index_select(attn_base, index, axis=2) 
         attn_base_replace = tmp_select.reshape((attn_base.shape[0], attn_base.shape[1], *self.mapper.shape)) \
                 .transpose((2, 0, 1, 3))
         attn_replace = attn_base_replace * self.alphas + att_replace * (1 - self.alphas)
-        # attn_replace = attn_replace / attn_replace.sum(-1, keepdims=True)
         return attn_replace
 
     def __init__(self, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
@@ -308,7 +306,6 @@ class AttentionReweight(AttentionControlEdit):
         if self.prev_controller is not None:
             attn_base = self.prev_controller.replace_cross_attention(attn_base, att_replace)
         attn_replace = attn_base[None, :, :, :] * self.equalizer[:, None, None, :]
-        # attn_replace = attn_replace / attn_replace.sum(-1, keepdims=True)
         return attn_replace
 
     def __init__(self, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float, equalizer,
