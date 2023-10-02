@@ -20,6 +20,7 @@ from typing import Optional, Union, Tuple, List, Callable, Dict
 from IPython.display import display
 from tqdm.notebook import tqdm
 import paddle_add
+import time, os
 
 
 def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, int] = (0, 0, 0)):
@@ -59,8 +60,8 @@ def view_images(images, num_rows=1, offset_ratio=0.02):
                 i * num_cols + j]
 
     pil_img = Image.fromarray(image_)
-    import time, os
-    os.makedirs("output", exist_ok=True)
+    if not os.path.exists("output"):
+        os.makedirs("output")
     pil_img.save("output/" + str(time.time()) + ".png")
     display(pil_img)
 
@@ -183,9 +184,9 @@ def register_attention_control(model, controller):
         else:
             to_out = self.to_out
 
-        def forward(x, context=None, mask=None, **kwargs):
-            context = kwargs["encoder_hidden_states"]
-            mask = kwargs["attention_mask"]
+        def forward(x, encoder_hidden_states=None, attention_mask=None):
+            context = encoder_hidden_states
+            mask = attention_mask
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             q = self.to_q(x)

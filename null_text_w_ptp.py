@@ -49,7 +49,7 @@ import paddle_add
 scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", 
                           clip_sample=False, set_alpha_to_one=False, steps_offset=1)
 LOW_RESOURCE = False 
-NUM_DDIM_STEPS = 30  # 50
+NUM_DDIM_STEPS = 50  # 50
 GUIDANCE_SCALE = 7.5
 MAX_NUM_WORDS = 77
 device = paddle.CUDAPlace(0) if paddle.device.cuda.device_count()>0 else paddle.CPUPlace()
@@ -582,7 +582,7 @@ class NullInversion:
 null_inversion = NullInversion(ldm_stable)
 
 
-# ## Infernce Code
+# ## Inference Code
 
 # In[6]:
 
