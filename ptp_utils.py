@@ -93,7 +93,7 @@ def init_latent(latent, model, height, width, generator, batch_size):
     if latent is None:
         latent = paddle.randn(
             (1, model.unet.in_channels, height // 8, width // 8),
-            # generator=generator,
+            generator=generator,
         )
     latents = latent.expand((batch_size,  model.unet.in_channels, height // 8, width // 8))
     return latent, latents
@@ -137,7 +137,7 @@ def text2image_ldm_stable(
     controller,
     num_inference_steps: int = 50,
     guidance_scale: float = 7.5,
-    generator: Optional[object] = None,
+    generator: Optional[paddle.fluid.libpaddle.Generator] = None,
     latent: Optional[paddle.Tensor] = None,
     low_resource: bool = False,
 ):
@@ -152,12 +152,12 @@ def text2image_ldm_stable(
         truncation=True,
         return_tensors="pd",
     )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    text_embeddings = model.text_encoder(text_input.input_ids.cuda())[0]
     max_length = text_input.input_ids.shape[-1]
     uncond_input = model.tokenizer(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pd"
     )
-    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
+    uncond_embeddings = model.text_encoder(uncond_input.input_ids.cuda())[0]
     
     context = [uncond_embeddings, text_embeddings]
     if not low_resource:

@@ -25,16 +25,17 @@
 
 # In[2]:
 
-
+import os
+os.environ["FLAGS_set_to_1d"] = "False"
 from typing import Optional, Union, Tuple, List, Callable, Dict
-import torch
-from diffusers import StableDiffusionPipeline
-import torch.nn.functional as nnf
+import paddle
+from ppdiffusers import StableDiffusionPipeline
+import paddle.nn.functional as nnf
 import numpy as np
 import abc
 import ptp_utils
 import seq_aligner
-
+import paddle_add
 
 # For loading the Stable Diffusion using Diffusers, follow the instuctions https://huggingface.co/blog/stable_diffusion and update ```MY_TOKEN``` with your token.
 # Set ```LOW_RESOURCE``` to ```True``` for running on 12GB GPU.
@@ -42,13 +43,12 @@ import seq_aligner
 # In[3]:
 
 
-MY_TOKEN = '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'
 LOW_RESOURCE = False 
 NUM_DIFFUSION_STEPS = 50
 GUIDANCE_SCALE = 7.5
 MAX_NUM_WORDS = 77
-device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", use_auth_token=MY_TOKEN).to(device)
+device = paddle.CUDAPlace(0) if paddle.device.cuda.device_count()>0 else paddle.CPUPlace()
+ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4")
 tokenizer = ldm_stable.tokenizer
 
 
@@ -67,26 +67,26 @@ class LocalBlend:
     def __call__(self, x_t, attention_store):
         k = 1
         maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
-        maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
-        maps = torch.cat(maps, dim=1)
+        maps = [item.reshape((self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS)) for item in maps]
+        maps = paddle.concat(maps, axis=1)
         maps = (maps * self.alpha_layers).sum(-1).mean(1)
         mask = nnf.max_pool2d(maps, (k * 2 + 1, k * 2 +1), (1, 1), padding=(k, k))
         mask = nnf.interpolate(mask, size=(x_t.shape[2:]))
-        mask = mask / mask.max(2, keepdims=True)[0].max(3, keepdims=True)[0]
-        mask = mask.gt(self.threshold)
-        mask = (mask[:1] + mask[1:]).float()
+        mask = mask / mask.max(2, keepdim=True).max(3, keepdim=True)
+        mask = mask.greater_than(paddle.to_tensor(self.threshold))
+        mask = paddle_add.add_bool_to_float(mask[:1], mask[1:])
         x_t = x_t[:1] + mask * (x_t - x_t[:1])
         return x_t
        
     def __init__(self, prompts: List[str], words: [List[List[str]]], threshold=.3):
-        alpha_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
+        alpha_layers = paddle.zeros((len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS))
         for i, (prompt, words_) in enumerate(zip(prompts, words)):
             if type(words_) is str:
                 words_ = [words_]
             for word in words_:
                 ind = ptp_utils.get_word_inds(prompt, word, tokenizer)
                 alpha_layers[i, :, :, :, :, ind] = 1
-        self.alpha_layers = alpha_layers.to(device)
+        self.alpha_layers = alpha_layers.cuda()
         self.threshold = threshold
 
 
@@ -182,7 +182,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         
     def replace_self_attention(self, attn_base, att_replace):
         if att_replace.shape[2] <= 16 ** 2:
-            return attn_base.unsqueeze(0).expand(att_replace.shape[0], *attn_base.shape)
+            return attn_base.unsqueeze(0).expand((att_replace.shape[0], *attn_base.shape))
         else:
             return att_replace
     
@@ -194,7 +194,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         super(AttentionControlEdit, self).forward(attn, is_cross, place_in_unet)
         if is_cross or (self.num_self_replace[0] <= self.cur_step < self.num_self_replace[1]):
             h = attn.shape[0] // (self.batch_size)
-            attn = attn.reshape(self.batch_size, h, *attn.shape[1:])
+            attn = attn.reshape((self.batch_size, h, *attn.shape[1:]))
             attn_base, attn_repalce = attn[0], attn[1:]
             if is_cross:
                 alpha_words = self.cross_replace_alpha[self.cur_step]
@@ -202,7 +202,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                 attn[1:] = attn_repalce_new
             else:
                 attn[1:] = self.replace_self_attention(attn_base, attn_repalce)
-            attn = attn.reshape(self.batch_size * h, *attn.shape[2:])
+            attn = attn.reshape((self.batch_size * h, *attn.shape[2:]))
         return attn
     
     def __init__(self, prompts, num_steps: int,
@@ -211,7 +211,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                  local_blend: Optional[LocalBlend]):
         super(AttentionControlEdit, self).__init__()
         self.batch_size = len(prompts)
-        self.cross_replace_alpha = ptp_utils.get_time_words_attention_alpha(prompts, num_steps, cross_replace_steps, tokenizer).to(device)
+        self.cross_replace_alpha = ptp_utils.get_time_words_attention_alpha(prompts, num_steps, cross_replace_steps, tokenizer).cuda()
         if type(self_replace_steps) is float:
             self_replace_steps = 0, self_replace_steps
         self.num_self_replace = int(num_steps * self_replace_steps[0]), int(num_steps * self_replace_steps[1])
@@ -220,18 +220,21 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
 class AttentionReplace(AttentionControlEdit):
 
     def replace_cross_attention(self, attn_base, att_replace):
-        return torch.einsum('hpw,bwn->bhpn', attn_base, self.mapper)
+        return paddle.einsum('hpw,bwn->bhpn', attn_base, self.mapper)
       
     def __init__(self, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float,
                  local_blend: Optional[LocalBlend] = None):
         super(AttentionReplace, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
-        self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer).to(device)
+        self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer).cuda()
         
 
 class AttentionRefine(AttentionControlEdit):
 
     def replace_cross_attention(self, attn_base, att_replace):
-        attn_base_replace = attn_base[:, :, self.mapper].permute(2, 0, 1, 3)
+        index = self.mapper.flatten()
+        tmp_select = paddle.index_select(attn_base, index, axis=2) 
+        attn_base_replace = tmp_select.reshape((attn_base.shape[0], attn_base.shape[1], *self.mapper.shape)) \
+                .transpose((2, 0, 1, 3))
         attn_replace = attn_base_replace * self.alphas + att_replace * (1 - self.alphas)
         return attn_replace
 
@@ -239,8 +242,8 @@ class AttentionRefine(AttentionControlEdit):
                  local_blend: Optional[LocalBlend] = None):
         super(AttentionRefine, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
         self.mapper, alphas = seq_aligner.get_refinement_mapper(prompts, tokenizer)
-        self.mapper, alphas = self.mapper.to(device), alphas.to(device)
-        self.alphas = alphas.reshape(alphas.shape[0], 1, 1, alphas.shape[1])
+        self.mapper, alphas = self.mapper.cuda(), alphas.cuda()
+        self.alphas = alphas.reshape((alphas.shape[0], 1, 1, alphas.shape[1]))
 
 
 class AttentionReweight(AttentionControlEdit):
@@ -254,7 +257,7 @@ class AttentionReweight(AttentionControlEdit):
     def __init__(self, prompts, num_steps: int, cross_replace_steps: float, self_replace_steps: float, equalizer,
                 local_blend: Optional[LocalBlend] = None, controller: Optional[AttentionControlEdit] = None):
         super(AttentionReweight, self).__init__(prompts, num_steps, cross_replace_steps, self_replace_steps, local_blend)
-        self.equalizer = equalizer.to(device)
+        self.equalizer = equalizer.cuda()
         self.prev_controller = controller
 
 
@@ -262,8 +265,8 @@ def get_equalizer(text: str, word_select: Union[int, Tuple[int, ...]], values: U
                   Tuple[float, ...]]):
     if type(word_select) is int or type(word_select) is str:
         word_select = (word_select,)
-    equalizer = torch.ones(len(values), 77)
-    values = torch.tensor(values, dtype=torch.float32)
+    equalizer = paddle.ones((len(values), 77))
+    values = paddle.to_tensor(values, dtype=paddle.get_default_dtype())
     for word in word_select:
         inds = ptp_utils.get_word_inds(text, word, tokenizer)
         equalizer[:, inds] = values
@@ -282,22 +285,22 @@ def aggregate_attention(attention_store: AttentionStore, res: int, from_where: L
     for location in from_where:
         for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
             if item.shape[1] == num_pixels:
-                cross_maps = item.reshape(len(prompts), -1, res, res, item.shape[-1])[select]
+                cross_maps = item.reshape((len(prompts), -1, res, res, item.shape[-1]))[select]
                 out.append(cross_maps)
-    out = torch.cat(out, dim=0)
+    out = paddle.concat(out, axis=0)
     out = out.sum(0) / out.shape[0]
     return out.cpu()
 
 
 def show_cross_attention(attention_store: AttentionStore, res: int, from_where: List[str], select: int = 0):
-    tokens = tokenizer.encode(prompts[select])
+    tokens = tokenizer.encode(prompts[select])["input_ids"]
     decoder = tokenizer.decode
     attention_maps = aggregate_attention(attention_store, res, from_where, True, select)
     images = []
     for i in range(len(tokens)):
         image = attention_maps[:, :, i]
         image = 255 * image / image.max()
-        image = image.unsqueeze(-1).expand(*image.shape, 3)
+        image = image.unsqueeze(-1).expand((*image.shape, 3))
         image = image.numpy().astype(np.uint8)
         image = np.array(Image.fromarray(image).resize((256, 256)))
         image = ptp_utils.text_under_image(image, decoder(int(tokens[i])))
@@ -341,10 +344,10 @@ def run_and_display(prompts, controller, latent=None, run_baseline=False, genera
 # In[7]:
 
 
-g_cpu = torch.Generator().manual_seed(8888)
+g_cpu = paddle.seed(888)
 prompts = ["A painting of a squirrel eating a burger"]
 controller = AttentionStore()
-image, x_t = run_and_display(prompts, controller, latent=None, run_baseline=False, generator=g_cpu)
+image, x_t = run_and_display(prompts, controller, latent=None, run_baseline=False, generator=None)
 show_cross_attention(controller, res=16, from_where=("up", "down"))
 
 

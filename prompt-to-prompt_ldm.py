@@ -364,7 +364,7 @@ def run_and_display(prompts, controller, latent=None, run_baseline=True, callbac
 g_cpu = paddle.seed(888)
 prompts = ["A painting of a squirrel eating a burger"]
 controller = AttentionStore()
-images, x_t = run_and_display(prompts, controller, run_baseline=False, generator=g_cpu)
+images, x_t = run_and_display(prompts, controller, run_baseline=False, generator=None)
 show_cross_attention(controller, res=16, from_where=["up", "down"])
 
 
