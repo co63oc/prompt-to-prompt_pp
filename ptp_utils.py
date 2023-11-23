@@ -137,7 +137,7 @@ def text2image_ldm_stable(
     controller,
     num_inference_steps: int = 50,
     guidance_scale: float = 7.5,
-    generator: Optional[paddle.fluid.libpaddle.Generator] = None,
+    generator: Optional[paddle.core.libpaddle.Generator] = None,
     latent: Optional[paddle.Tensor] = None,
     low_resource: bool = False,
 ):
